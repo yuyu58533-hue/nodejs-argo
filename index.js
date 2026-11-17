@@ -232,6 +232,7 @@ function ensureTlsCertificates(certPath, keyPath) {
 }
 
 // 计算证书的 SHA-256 指纹，优先使用 openssl，不可用时用 Node.js crypto 兜底
+// 返回格式：小写 hex、64 位、去冒号（pinSHA256 要求；冒号分隔会让 V2RayN/Xray 在 pinnedPeerCertSha256 处报 encoding/hex 错误）。算不出返回 ''。
 function getCertificateFingerprint(certPath) {
   // 方案1: 优先用 openssl
   try {
@@ -241,7 +242,8 @@ function getCertificateFingerprint(certPath) {
     ).trim();
     const match = result.match(/=(.+)$/);
     if (match && match[1]) {
-      return match[1].toUpperCase();
+      const fp = match[1].replace(/:/g, '').toLowerCase();
+      if (/^[0-9a-f]{64}$/.test(fp)) return fp;
     }
   } catch (e) {
     // openssl 不可用，继续用 Node.js crypto
@@ -255,7 +257,8 @@ function getCertificateFingerprint(certPath) {
     const derBase64 = derMatch[1].replace(/\s/g, '');
     const derBuffer = Buffer.from(derBase64, 'base64');
     const hash = crypto.createHash('sha256').update(derBuffer).digest('hex');
-    return hash.match(/.{2}/g).join(':').toUpperCase();
+    if (/^[0-9a-f]{64}$/.test(hash)) return hash;
+    return '';
   } catch (error) {
     console.error('Failed to calculate certificate fingerprint:', error);
     return '';
@@ -787,11 +790,11 @@ vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=${encodeURIComponent(vlessEnc.encryption)}&security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Fvless-enc-argo%3Fed%3D2560#${nodeName}-VLESS-Enc
     `;
 
-      // HY2_PORT是有效端口号时生成hysteria2节点
+      // HY2_PORT是有效端口号时生成hysteria2节点（pinSHA256 用小写 hex64；算不出指纹时只带 insecure=1，不中断）
       if (isValidPort(HY2_PORT)) {
         const fingerprint = getCertificateFingerprint(certPath);
-        const fingerprintParam = fingerprint ? `&pinSHA256=${encodeURIComponent(fingerprint)}` : '';
-        const hysteriaNode = `\nhysteria2://${UUID}@${SERVER_IP}:${HY2_PORT}/?sni=www.bing.com&insecure=0&alpn=h3&obfs=none${fingerprintParam}#${nodeName}`;
+        const fingerprintParam = fingerprint ? `&pinSHA256=${fingerprint}` : '';
+        const hysteriaNode = `\nhysteria2://${UUID}@${SERVER_IP}:${HY2_PORT}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none${fingerprintParam}#${nodeName}`;
         subTxt += hysteriaNode;
       }
 
