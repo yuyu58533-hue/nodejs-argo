@@ -25,6 +25,7 @@ const ARGO_PORT = process.env.ARGO_PORT || 8001;            // 固定隧道端�
 const S5_PORT = process.env.S5_PORT || '';                  // socks5端口，支持多端口的可以填写，否则留空
 const HY2_PORT = process.env.HY2_PORT || '';                // hy2端口，支持多端口的可以填写，否则留空
 const REALITY_PORT = process.env.REALITY_PORT || '';        // reality端口，支持多端口的可以填写，否则留空
+const SS_PORT = process.env.SS_PORT || '';                  // ss端口，支持多端口的可以填写，否则留空
 const CFIP = process.env.CFIP || 'saas.sin.fan';            // 节点优选域名或优选ip
 const CFPORT = process.env.CFPORT || 443;                   // 节点优选域名或优选ip对应的端口
 const NAME = process.env.NAME || '';                        // 节点名称
@@ -107,7 +108,7 @@ function deleteNodes() {
 
     const decoded = Buffer.from(fileContent, 'base64').toString('utf-8');
     const nodes = decoded.split('\n').filter(line =>
-      /(vless|vmess|trojan|hysteria2|socks):\/\//.test(line)
+      /(vless|trojan|hysteria2|ss|socks):\/\//.test(line)
     );
 
     if (nodes.length === 0) return;
@@ -153,6 +154,22 @@ function generateX25519Keypair() {
     privateKey: privateKeyRaw.toString('base64url'),
     publicKey: publicKeyRaw.toString('base64url')
   };
+}
+
+// 由 UUID 稳定派生 VLESS Encryption 的 X25519 认证密钥对：私钥放服务端 decryption，公钥放客户端 encryption。
+// UUID 本身就是节点凭证，能拿到 UUID 才能派生，所以派生不引入新的泄露面；加密本身由 ML-KEM-768 + X25519 临时密钥提供前向保密。
+// 格式与 `xray vlessenc` 的 X25519 输出一致：mlkem768x25519plus.native.<600s|0rtt>.<32 字节 base64url>。
+function deriveVlessEncKeypair() {
+  const raw = crypto.createHash('sha256').update('vless-enc:' + UUID).digest();
+  const privateKeyB64 = raw.toString('base64url');
+  const pkcs8 = Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), raw]);
+  const pub = crypto.createPublicKey(crypto.createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' })).export({ type: 'spki', format: 'der' }).subarray(-32);
+  return { decryption: `mlkem768x25519plus.native.600s.${privateKeyB64}`, encryption: `mlkem768x25519plus.native.0rtt.${pub.toString('base64url')}` };
+}
+
+// 由 UUID 稳定派生 Shadowsocks 2022-blake3-aes-128-gcm 的 16 字节密钥（base64）。
+function deriveSsPassword() {
+  return crypto.createHash('sha256').update('ss-key:' + UUID).digest().subarray(0, 16).toString('base64');
 }
 
 // X25519 密钥对生成或加载
@@ -254,12 +271,13 @@ async function generateConfig() {
       // path: it asks /vless-xhttp-argo/<session-uuid> (GET) and /vless-xhttp-argo/<uuid>/0 (POST),
       // which never exact-matches the path rule below, so XHTTP traffic only arrives via the default.
       // Pointing the default at 3001 (raw TCP VLESS) rejects it with "invalid request version".
-      { tag: 'vless-fallback-in', port: ARGO_PORT, listen: '::', protocol: 'vless', settings: { clients: [{ id: UUID, flow: 'xtls-rprx-vision' }], decryption: 'none', fallbacks: [{ dest: 3006 }, { path: "/vless-argo", dest: 3002 }, { path: "/vmess-argo", dest: 3003 }, { path: "/trojan-argo", dest: 3004 }, { path: "/vless-xhttp-argo", dest: 3006 }] }, streamSettings: { network: 'tcp' } },
+      { tag: 'vless-fallback-in', port: ARGO_PORT, listen: '::', protocol: 'vless', settings: { clients: [{ id: UUID, flow: 'xtls-rprx-vision' }], decryption: 'none', fallbacks: [{ dest: 3006 }, { path: "/vless-argo", dest: 3002 }, { path: "/vless-httpupgrade-argo", dest: 3003 }, { path: "/trojan-argo", dest: 3004 }, { path: "/vless-xhttp-argo", dest: 3006 }, { path: "/vless-enc-argo", dest: 3007 }] }, streamSettings: { network: 'tcp' } },
       { tag: 'vless-tcp-in', port: 3001, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID }], decryption: "none" }, streamSettings: { network: "tcp", security: "none" } },
       { tag: 'vless-ws-in', port: 3002, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID, level: 0 }], decryption: "none" }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/vless-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
-      { tag: 'vmess-ws-in', port: 3003, listen: "127.0.0.1", protocol: "vmess", settings: { clients: [{ id: UUID, alterId: 0 }] }, streamSettings: { network: "ws", wsSettings: { path: "/vmess-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
+      { tag: 'vless-httpupgrade-in', port: 3003, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID, level: 0 }], decryption: "none" }, streamSettings: { network: "httpupgrade", security: "none", httpupgradeSettings: { path: "/vless-httpupgrade-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
       { tag: 'trojan-ws-in', port: 3004, listen: "127.0.0.1", protocol: "trojan", settings: { clients: [{ password: UUID }] }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/trojan-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
       { tag: 'vless-xhttp-in', port: 3006, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID, level: 0 }], decryption: "none" }, streamSettings: { network: "xhttp", security: "none", xhttpSettings: { mode: "auto", path: "/vless-xhttp-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
+      { tag: 'vless-enc-ws-in', port: 3007, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID, level: 0 }], decryption: deriveVlessEncKeypair().decryption }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/vless-enc-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
     ],
     dns: { servers: ["https+local://8.8.8.8/dns-query"] },
     outbounds: [{ protocol: "freedom", tag: "direct" }, { protocol: "blackhole", tag: "block" }]
@@ -341,6 +359,21 @@ async function generateConfig() {
           }
         ],
         udp: true
+      }
+    });
+  }
+
+  // Shadowsocks 直连配置（2022-blake3-aes-128-gcm，仅多端口平台可用）
+  if (isValidPort(SS_PORT)) {
+    config.inbounds.push({
+      tag: "ss-in",
+      listen: "::",
+      port: parseInt(SS_PORT),
+      protocol: "shadowsocks",
+      settings: {
+        method: "2022-blake3-aes-128-gcm",
+        password: deriveSsPassword(),
+        network: "tcp,udp"
       }
     });
   }
@@ -739,17 +772,19 @@ async function generateLinks(argoDomain) {
 
   return new Promise((resolve) => {
     setTimeout(() => {
-      const VMESS = { v: '2', ps: `${nodeName}`, add: CFIP, port: CFPORT, id: UUID, aid: '0', scy: 'auto', net: 'ws', type: 'none', host: argoDomain, path: '/vmess-argo?ed=2560', tls: 'tls', sni: argoDomain, alpn: '', fp: 'firefox' };
+      const vlessEnc = deriveVlessEncKeypair();
       let subTxt = `
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Fvless-argo%3Fed%3D2560#${nodeName}
 
-vmess://${Buffer.from(JSON.stringify(VMESS)).toString('base64')}
+vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=httpupgrade&host=${argoDomain}&path=%2Fvless-httpupgrade-argo#${nodeName}-HTTPUpgrade
 
 trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Ftrojan-argo%3Fed%3D2560#${nodeName}
 
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=xhttp&host=${argoDomain}&path=%2Fvless-xhttp-argo&mode=auto&alpn=h2#${nodeName}-XHTTP-H2
 
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=xhttp&host=${argoDomain}&path=%2Fvless-xhttp-argo&mode=auto&alpn=h3#${nodeName}-XHTTP-H3
+
+vless://${UUID}@${CFIP}:${CFPORT}?encryption=${encodeURIComponent(vlessEnc.encryption)}&security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Fvless-enc-argo%3Fed%3D2560#${nodeName}-VLESS-Enc
     `;
 
       // HY2_PORT是有效端口号时生成hysteria2节点
@@ -771,6 +806,13 @@ vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}
         const S5_AUTH = Buffer.from(`${UUID.substring(0, 8)}:${UUID.slice(-12)}`).toString('base64');
         const s5Node = `\nsocks://${S5_AUTH}@${SERVER_IP}:${S5_PORT}#${nodeName}`;
         subTxt += s5Node;
+      }
+
+      // SS_PORT是有效端口号时生成shadowsocks节点
+      if (isValidPort(SS_PORT)) {
+        const ssUserinfo = Buffer.from(`2022-blake3-aes-128-gcm:${deriveSsPassword()}@${SERVER_IP}:${SS_PORT}`).toString('base64');
+        const ssNode = `\nss://${ssUserinfo}#${nodeName}`;
+        subTxt += ssNode;
       }
 
       console.log(Buffer.from(subTxt).toString('base64'));
@@ -815,7 +857,7 @@ async function uploadNodes() {
   } else if (UPLOAD_URL) {
     if (!fs.existsSync(listPath)) return;
     const content = fs.readFileSync(listPath, 'utf-8');
-    const nodes = content.split('\n').filter(line => /(vless|vmess|trojan|hysteria2|socks):\/\//.test(line));
+    const nodes = content.split('\n').filter(line => /(vless|trojan|hysteria2|ss|socks):\/\//.test(line));
 
     if (nodes.length === 0) return;
 
